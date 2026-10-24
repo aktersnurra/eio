@@ -6,10 +6,13 @@ on:
 
 jobs:
   build:
+    env:
+      EIO_BACKEND: posix
     strategy:
       fail-fast: false
       matrix:
         os:
+          - ubuntu-latest
           - macos-latest
         ocaml-compiler:
           - 5
