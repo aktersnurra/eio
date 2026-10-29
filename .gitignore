@@ -3,3 +3,6 @@ _opam
 .ocamlformat
 .*.swp
 *.install
+
+# Native/POSIX validation artifacts
+/ci-logs/

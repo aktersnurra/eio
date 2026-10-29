@@ -20,7 +20,6 @@ module Lf_queue = Eio_utils.Lf_queue
 module Fiber_context = Eio.Private.Fiber_context
 module Trace = Eio.Private.Trace
 module Rcfd = Eio_unix.Private.Rcfd
-module Poll = Iomux.Poll
 
 type exit = [`Exit_scheduler]
 
@@ -42,8 +41,7 @@ type t = {
   (* The queue of runnable fibers ready to be resumed. Note: other domains can also add work items here. *)
   run_q : runnable Lf_queue.t;
 
-  poll : Poll.t;
-  mutable poll_maxi : int;      (* The highest index ever used in [poll]. *)
+  poller : Poller.t;
   fd_map : (Unix.file_descr, fd_event_waiters) Hashtbl.t;
 
   (* When adding to [run_q] from another domain, this domain may be sleeping and so won't see the event.
@@ -125,37 +123,12 @@ let rec clear_event_fd t =
     (* Interrupted by a signal before anything was read; the event is still there. *)
     clear_event_fd t
 
-(* Update [t.poll]'s entry for [fd] to match [waiters]. *)
+(* Update the multiplexer interests for [fd] to match [waiters]. *)
 let update t waiters fd =
-  let fdi = Iomux.Util.fd_of_unix fd in
-  let flags =
-    match not (Lwt_dllist.is_empty waiters.read),
-          not (Lwt_dllist.is_empty waiters.write) with
-    | false, false -> Poll.Flags.empty
-    | true, false -> Poll.Flags.pollin
-    | false, true -> Poll.Flags.pollout
-    | true, true -> Poll.Flags.(pollin + pollout)
-  in
-  if flags = Poll.Flags.empty then (
-    Poll.invalidate_index t.poll fdi;
-    (* Try to find the new maxi, go back on index until we find the next
-       used slot, -1 means none in use. *)
-    let rec lower_maxi = function
-      | -1 -> t.poll_maxi <- -1
-      | index ->
-        if Poll.((get_fd t.poll index) <> invalid_fd) then
-          t.poll_maxi <- index
-        else
-          lower_maxi (pred index)
-    in
-    if fdi = t.poll_maxi then
-      lower_maxi (pred fdi);
-    Hashtbl.remove t.fd_map fd
-  ) else (
-    Poll.set_index t.poll fdi fd flags;
-    if fdi > t.poll_maxi then
-      t.poll_maxi <- fdi
-  )
+  let read = not (Lwt_dllist.is_empty waiters.read) in
+  let write = not (Lwt_dllist.is_empty waiters.write) in
+  Poller.set t.poller fd ~read ~write;
+  if not read && not write then Hashtbl.remove t.fd_map fd
 
 let resume t node =
   t.active_ops <- t.active_ops - 1;
@@ -169,14 +142,14 @@ let resume_failed t ex node =
   Fiber_context.clear_cancel_fn k.fiber;
   enqueue_failed_thread t k ex
 
-(* Called when poll indicates that an event we requested for [fd] is ready. *)
-let ready t _index fd revents =
+(* Called when the multiplexer reports readiness for [fd]. *)
+let ready t fd event =
   if fd == t.eventfd_r then (
     clear_event_fd t
     (* The scheduler will now look at the run queue again and notice any new items. *)
   ) else if fd == (t.signal_r :> Unix.file_descr) then (
     Eio_unix.Private.Signal_fd.ack t.signal_r
-  ) else if Poll.Flags.(mem revents pollnval) then (
+  ) else if event = Poller.Unpollable then (
     let waiters = Hashtbl.find t.fd_map fd in
     let pending = Lwt_dllist.create () in
     Lwt_dllist.transfer_l waiters.write pending;
@@ -186,9 +159,9 @@ let ready t _index fd revents =
   ) else (
     let waiters = Hashtbl.find t.fd_map fd in
     let pending = Lwt_dllist.create () in
-    if Poll.Flags.(mem revents (pollout + pollhup + pollerr)) then
+    if event = Poller.Write || event = Poller.Read_write then
       Lwt_dllist.transfer_l waiters.write pending;
-    if Poll.Flags.(mem revents (pollin + pollhup + pollerr)) then
+    if event = Poller.Read || event = Poller.Read_write then
       Lwt_dllist.transfer_l waiters.read pending;
     (* If pending has things, it means we modified the waiters, refresh our view *)
     if not (Lwt_dllist.is_empty pending) then
@@ -227,8 +200,8 @@ let rec next t : [`Exit_scheduler] =
           let time = Mtime.to_uint64_ns time in
           let now = Mtime.to_uint64_ns now in
           let diff_ns = Int64.sub time now in
-          Poll.Nanoseconds diff_ns
-        | `Nothing -> Poll.Infinite
+          Poller.Nanoseconds diff_ns
+        | `Nothing -> Poller.Infinite
       in
       if timeout = Infinite && t.active_ops = 0 && Lf_queue.is_empty t.run_q then (
         (* Nothing further can happen at this point. *)
@@ -242,7 +215,7 @@ let rec next t : [`Exit_scheduler] =
             (* Either we're just checking for IO to avoid starvation, or
                someone added a new job while we were setting [need_wakeup] to [true].
                They might or might not have seen that, so we can't be sure they'll send an event. *)
-            Poll.Nowait
+            Poller.Nowait
           )
         in
         (* At this point we're not going to check [run_q] again before sleeping.
@@ -250,17 +223,19 @@ let rec next t : [`Exit_scheduler] =
            If [need_wakeup = false], a wake-up event will arrive and wake us up soon. *)
         Trace.suspend_domain Begin;
         let nready =
-          try Poll.ppoll_or_poll t.poll (t.poll_maxi + 1) timeout
-          with Unix.Unix_error (Unix.EINTR, _, "") -> 0
+          try Poller.wait t.poller timeout
+          with Unix.Unix_error (Unix.EINTR, _, _) -> 0
         in
         Trace.suspend_domain End;
         Atomic.set t.need_wakeup false;
         Lf_queue.push t.run_q IO;                   (* Re-inject IO job in the run queue *)
-        Poll.iter_ready t.poll nready (ready t);
+        Poller.iter_ready t.poller nready (ready t);
         next t
       )
 
 let with_sched fn =
+  let poller = Poller.create () in
+  Fun.protect ~finally:(fun () -> Poller.close poller) @@ fun () ->
   let run_q = Lf_queue.create () in
   Lf_queue.push run_q IO;
   let sleep_q = Zzz.create () in
@@ -274,17 +249,11 @@ let with_sched fn =
     let was_open = Rcfd.close eventfd in
     assert was_open
   in
-  let poll = Poll.create () in
   let fd_map = Hashtbl.create 10 in
   let thread_pool = Eio_unix.Private.Thread_pool.create ~sleep_q in
-  let t = { run_q; poll; poll_maxi = (-1); fd_map; eventfd; eventfd_r; signal_r;
+  let t = { run_q; poller; fd_map; eventfd; eventfd_r; signal_r;
             active_ops = 0; need_wakeup = Atomic.make false; sleep_q; thread_pool } in
-  let monitor fd =
-    let i = Iomux.Util.fd_of_unix fd in
-    Poll.set_index t.poll i fd Poll.Flags.pollin;
-    if i > t.poll_maxi then
-      t.poll_maxi <- i
-  in
+  let monitor fd = Poller.set poller fd ~read:true ~write:false in
   monitor eventfd_r;
   monitor (signal_r :> Unix.file_descr);
   match fn t with
