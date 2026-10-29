@@ -23,6 +23,9 @@ case ${1:-} in
     opam exec -- dune build @all 2>&1 | tee ci-logs/build.log
     ;;
   test)
+    # MDX examples mutate their working directories. --force alone does not
+    # remove fixtures left behind by a previous poller or a failing example.
+    opam exec -- dune clean
     opam exec -- dune runtest --force 2>&1 | tee "ci-logs/tests-$EIO_POSIX_POLLER.log"
     ;;
   *) printf 'Usage: %s build|test\n' "$0" >&2; exit 2 ;;

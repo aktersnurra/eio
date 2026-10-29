@@ -116,3 +116,7 @@ bash .github/ci/posix.sh test
 
 A configured workflow is not evidence of execution. The unrestricted full-suite
 requirement above remains open until a successful run is linked to its commit.
+
+Full-suite CI runs clean the Dune build directory first. MDX examples mutate
+filesystem fixtures, so `--force` alone is insufficient to isolate a second
+poller run after a failed example. Logs are stored outside the build directory.
