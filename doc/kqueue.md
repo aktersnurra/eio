@@ -101,3 +101,18 @@ the integration belongs in `eio_posix`.
 
 This work changes readiness notification. It does not provide io_uring-style
 buffer selection, asynchronous disk I/O, or transaction batching.
+
+## Reproducible validation
+
+The POSIX jobs use OCaml 5.4.0 on Ubuntu 24.04 and macOS 15. They check out
+and record the PR head (rather than claiming a synthetic merge is the head),
+build the whole workspace, and run the full suite with `--force`. Environment,
+build, and test logs are uploaded even on failure. Run the same commands with:
+
+```sh
+bash .github/ci/posix.sh build
+bash .github/ci/posix.sh test
+```
+
+A configured workflow is not evidence of execution. The unrestricted full-suite
+requirement above remains open until a successful run is linked to its commit.

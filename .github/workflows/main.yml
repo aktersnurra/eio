@@ -12,18 +12,21 @@ jobs:
       fail-fast: false
       matrix:
         os:
-          - ubuntu-latest
-          - macos-latest
+          - ubuntu-24.04
+          - macos-15
         ocaml-compiler:
-          - 5
+          - 5.4.0
         local-packages:
           - eio eio_posix eio_main
 
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Use OCaml ${{ matrix.ocaml-compiler }}
         uses: ocaml/setup-ocaml@v3
@@ -34,7 +37,17 @@ jobs:
 
       - run: opam --cli=2.1 pin -yn --with-version=dev .
       - run: opam install ${{ matrix.local-packages }} --deps-only --with-test
-      - run: opam install ${{ matrix.local-packages }} --with-test
+      - name: Build POSIX workspace
+        run: bash .github/ci/posix.sh build
+      - name: Run full POSIX suite
+        run: bash .github/ci/posix.sh test
+      - name: Preserve validation logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: posix-${{ matrix.os }}
+          path: ci-logs/
+          if-no-files-found: warn
   windows:
     runs-on: windows-latest
 
