@@ -28,5 +28,13 @@ case ${1:-} in
     opam exec -- dune clean
     opam exec -- dune runtest --force 2>&1 | tee "ci-logs/tests-$EIO_POSIX_POLLER.log"
     ;;
-  *) printf 'Usage: %s build|test\n' "$0" >&2; exit 2 ;;
+  properties)
+    status=0
+    opam exec -- dune exec lib_eio_posix/test/test_kqueue_properties.exe -- --seed 424242 --verbose \
+      2>&1 | tee "ci-logs/properties-$EIO_POSIX_POLLER-seed-424242.log" || status=1
+    opam exec -- dune exec lib_eio_posix/test/test_kqueue_properties.exe -- --verbose \
+      2>&1 | tee "ci-logs/properties-$EIO_POSIX_POLLER-random.log" || status=1
+    exit "$status"
+    ;;
+  *) printf 'Usage: %s build|test|properties\n' "$0" >&2; exit 2 ;;
 esac

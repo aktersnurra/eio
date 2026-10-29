@@ -50,6 +50,7 @@
  (depends
   (eio (= :version))
   (iomux (>= 0.2))
+  (qcheck-core (and (>= 0.25) :with-test))
   (kqueue (and (>= 0.7.0)
                (or (= :os "freebsd") (= :os "macos") (= :os "openbsd"))))
   (mdx (and (>= 2.4.1) :with-test))

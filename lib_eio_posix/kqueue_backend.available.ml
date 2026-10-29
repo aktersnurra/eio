@@ -29,7 +29,7 @@ module Kernel = struct
   let rec kind fd =
     (* EVFILT_READ on a regular file at EOF may never fire; poll/select report
        regular files ready unconditionally. Preserve that contract, and use
-       the existing select fallback for device-specific filters too. *)
+       the bounded worker fallback for device-specific filters too. *)
     match (Unix.fstat fd).Unix.st_kind with
     | Unix.S_SOCK | S_FIFO -> `Native
     | S_REG | S_DIR -> `Ready
