@@ -125,8 +125,8 @@ module Make (Kernel : Kernel) = struct
     end;
     t.synthetic <- [];
     t.native_count <- 0;
-    (* Only rejected registrations are in this queue. Normal waits inspect ready
-       events, never all registered descriptors. Retain live synthetic events
+    (* Only synthetic readiness/failures are in this queue. Normal socket waits
+       inspect ready events, never all registrations. Retain live synthetic events
        until their waiter is removed, including when a native wait gets EINTR. *)
     for _ = 1 to Queue.length t.pending do
       let (fd, token, _) as item = Queue.take t.pending in

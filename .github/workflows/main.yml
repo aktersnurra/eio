@@ -48,6 +48,9 @@ jobs:
         run: bash .github/ci/posix.sh build
       - name: Run full POSIX suite
         run: bash .github/ci/posix.sh test
+      - name: Replay and generate property programs
+        if: ${{ !cancelled() }}
+        run: bash .github/ci/posix.sh properties
       - name: Preserve validation logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -110,6 +113,7 @@ jobs:
             status=0
             for poller in poll kqueue; do
               EIO_POSIX_POLLER="$poller" bash .github/ci/posix.sh test || status=1
+              EIO_POSIX_POLLER="$poller" bash .github/ci/posix.sh properties || status=1
             done
             exit "$status"
       - name: Preserve FreeBSD validation logs

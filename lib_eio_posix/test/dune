@@ -38,3 +38,11 @@
  (enabled_if (= %{os_type} "Unix"))
  (foreign_stubs (language c) (names pty_stubs))
  (libraries unix))
+
+(test
+ (name test_kqueue_properties)
+ (deps (env_var "EIO_POSIX_POLLER"))
+ (modules test_kqueue_properties)
+ (package eio_posix)
+ (build_if (= %{os_type} "Unix"))
+ (libraries eio_posix iomux kqueue_test_support qcheck-core qcheck-core.runner))

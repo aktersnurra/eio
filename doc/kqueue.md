@@ -78,6 +78,30 @@ named Unix sockets and ownership changes fail in `tests/fd_passing.md`,
 `tests/network.md`, and `tests/fs.md`. Unmodified upstream produces identical
 corrected output for those files.
 
+## QCheck programs and replay
+
+The property suite adds 1,000 command programs against an independent
+registration-identity model, plus 500 live-socket programs for poll and 500 for
+kqueue when available. Commands cover interest replacement, failures after a
+partial update, interruption, delayed batches, removal from inside a callback,
+sending/draining socket data, and `dup2` descriptor replacement. Command lists shrink by removing interior
+commands as well as chunks. QCheck is a test-only dependency.
+
+```sh
+dune exec lib_eio_posix/test/test_kqueue_properties.exe -- --seed 424242 --verbose
+```
+
+On Linux without native kqueue, all 1,500 model/poll programs pass. A mutation
+check that disables generation validation is rejected and shrinks to two
+registration changes; the original implementation was restored afterward.
+Unavailable native properties are reported explicitly, and an explicit kqueue
+request fails rather than silently skipping them.
+
+The live kqueue socket property currently exposes an `ENOENT` on filter re-add
+after `dup2` in the Linux libkqueue compatibility build. This may reflect its
+emulation of automatic filter removal. The case remains enabled, unchanged,
+for native CI; no native property-test pass is claimed.
+
 ## Performance gate and upstream path
 
 Benchmark on a real FreeBSD host before changing the default. Use 100, 1,000,
@@ -125,6 +149,11 @@ on hosts without a controlling terminal.
 These tests run under the explicitly selected poller. Passing with Linux poll
 validates the fixtures, not native kqueue. The `dup2` regression is not disabled
 for libkqueue or native platforms; failures must be diagnosed rather than waived.
+
+CI runs the properties with fixed seed 424242 and a fresh random seed separately
+from the full suite, retaining both logs even if one fails. Reproduce with
+`bash .github/ci/posix.sh properties`. Poll and kqueue use the same generator;
+separate QCheck properties do not imply identical generated command sequences.
 
 Full-suite CI runs clean the Dune build directory first. MDX examples mutate
 filesystem fixtures, so `--force` alone is insufficient to isolate a second
