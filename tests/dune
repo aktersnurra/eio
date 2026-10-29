@@ -2,5 +2,5 @@
   (package eio_main)
   (enabled_if (<> %{os_type} "Win32"))
   (deps
-    (env_var "EIO_BACKEND")
+    (env_var "EIO_BACKEND") (env_var "EIO_POSIX_POLLER")
     (package eio_main)))

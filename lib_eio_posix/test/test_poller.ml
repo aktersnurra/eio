@@ -133,6 +133,58 @@ let eof () =
   let got = Unix.read a (Bytes.create 1) 0 1 in
   assert (got = 0)
 
+let regular_file_at_eof () =
+  let path, channel = Filename.open_temp_file "eio-poller-" ".tmp" in
+  close_out channel;
+  Fun.protect ~finally:(fun () -> Unix.unlink path) @@ fun () ->
+  let fd = Unix.openfile path [Unix.O_RDWR] 0 in
+  Fun.protect ~finally:(fun () -> Unix.close fd) @@ fun () ->
+  Fiber.both
+    (fun () -> Eio_unix.await_readable fd)
+    (fun () -> Eio_unix.await_writable fd);
+  let got = Unix.read fd (Bytes.create 1) 0 1 in
+  assert (got = 0)
+
+let eof_with_data () =
+  with_socketpair @@ fun a b ->
+  write_byte b;
+  Unix.shutdown b Unix.SHUTDOWN_SEND;
+  Eio_unix.await_readable a;
+  let buf = Bytes.create 1 in
+  let got = Unix.read a buf 0 1 in
+  assert (got = 1 && Bytes.get buf 0 = '!');
+  Eio_unix.await_readable a;
+  let got = Unix.read a buf 0 1 in
+  assert (got = 0)
+
+let peer_shutdown () =
+  with_socketpair @@ fun a b ->
+  fill_socket a;
+  Switch.run @@ fun sw ->
+  let read_ready = fork_waiter ~sw Eio_unix.await_readable a in
+  let write_ready = fork_waiter ~sw Eio_unix.await_writable a in
+  Unix.shutdown b Unix.SHUTDOWN_ALL;
+  Promise.await read_ready;
+  Promise.await write_ready;
+  begin match Unix.single_write a (Bytes.of_string "!") 0 1 with
+  | _ -> failwith "write to shut down peer unexpectedly succeeded"
+  | exception Unix.Unix_error ((Unix.EPIPE | ECONNRESET), _, _) -> ()
+  end
+
+let connection_refused () =
+  let reserved = Unix.socket ~cloexec:true Unix.PF_INET Unix.SOCK_STREAM 0 in
+  Fun.protect ~finally:(fun () -> Unix.close reserved) @@ fun () ->
+  (* Reserve a local port without listening, so a different server cannot
+     accidentally make this connection succeed. *)
+  Unix.bind reserved (Unix.ADDR_INET (Unix.inet_addr_loopback, 0));
+  let address = Unix.getsockname reserved in
+  Switch.run @@ fun sw ->
+  let socket = Eio_posix.Low_level.socket ~sw Unix.PF_INET Unix.SOCK_STREAM 0 in
+  match Eio_posix.Low_level.connect socket address with
+  | () -> failwith "connection to a non-listening socket unexpectedly succeeded"
+  | exception Unix.Unix_error (Unix.ECONNREFUSED, _, _) -> ()
+  | exception Eio.Io (Eio.Net.E (Eio.Net.Connection_failure (Eio.Net.Refused _)), _) -> ()
+
 let () =
   List.iter (fun (name, test) ->
       Printf.printf "%s:%!" name;
@@ -149,4 +201,8 @@ let () =
     "remove highest descriptor", remove_highest;
     "reuse descriptor number", reuse_descriptor;
     "EOF wakes reader", eof;
+    "regular file at EOF", regular_file_at_eof;
+    "EOF preserves buffered data", eof_with_data;
+    "peer shutdown wakes both directions", peer_shutdown;
+    "connection refusal is preserved", connection_refused;
   ]

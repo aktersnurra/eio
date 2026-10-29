@@ -8,12 +8,19 @@ jobs:
   build:
     env:
       EIO_BACKEND: posix
+      EIO_POSIX_POLLER: ${{ matrix.poller }}
     strategy:
       fail-fast: false
       matrix:
         os:
           - ubuntu-24.04
           - macos-15
+        poller:
+          - poll
+          - kqueue
+        exclude:
+          - os: ubuntu-24.04
+            poller: kqueue
         ocaml-compiler:
           - 5.4.0
         local-packages:
@@ -45,7 +52,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: posix-${{ matrix.os }}
+          name: posix-${{ matrix.os }}-${{ matrix.poller }}
           path: ci-logs/
           if-no-files-found: warn
   windows:
@@ -71,8 +78,44 @@ jobs:
       - run: opam exec -- dune exec -- ./examples/net/main.exe
       - run: opam exec -- dune exec -- ./examples/fs/main.exe
   docker:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
     - uses: actions/checkout@v2
     - name: Build the Docker image
       run: docker build .
+
+  freebsd:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Test poll and kqueue on FreeBSD 14.3
+        uses: vmactions/freebsd-vm@c46abacb49f09938ca4e1702d15d836285d694cc # v1.5.9
+        with:
+          release: "14.3"
+          arch: amd64
+          prepare: pkg install -y opam gmake pkgconf git bash
+          run: |
+            set -eu
+            export OPAMROOT=/tmp/eio-opam
+            export OPAMJOBS=3
+            opam init --bare --disable-sandboxing --no-setup -y
+            opam switch create eio-kqueue ocaml-base-compiler.5.4.0 -y
+            eval $(opam env --switch=eio-kqueue)
+            opam pin -yn --with-version=dev .
+            opam install eio eio_posix eio_main --deps-only --with-test -y
+            bash .github/ci/posix.sh build
+            status=0
+            for poller in poll kqueue; do
+              EIO_POSIX_POLLER="$poller" bash .github/ci/posix.sh test || status=1
+            done
+            exit "$status"
+      - name: Preserve FreeBSD validation logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: posix-freebsd-14.3-amd64
+          path: ci-logs/
+          if-no-files-found: warn

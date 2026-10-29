@@ -7,7 +7,10 @@
   (flags :standard -D_LARGEFILE64_SOURCE)
   (include_dirs ../lib_eio/unix/include)
   (names eio_posix_stubs))
- (libraries eio eio.utils eio.unix fmt iomux))
+ (libraries eio eio.utils eio.unix fmt iomux
+  (select kqueue_backend.ml from
+   (kqueue -> kqueue_backend.available.ml)
+   (-> kqueue_backend.unavailable.ml))))
 
 (rule
  (targets config.ml)
@@ -20,7 +23,8 @@
  (action
   (with-stdout-to
    primitives.h.new
-   (run %{bin:lintcstubs_arity_cmt} %{dep:.eio_posix.objs/byte/eio_posix__Low_level.cmt}))))
+   (run %{bin:lintcstubs_arity_cmt} %{dep:.eio_posix.objs/byte/eio_posix__Low_level.cmt}
+        %{dep:.eio_posix.objs/byte/eio_posix__Poller_types.cmt}))))
 
 (rule
  (enabled_if (and (= %{os_type} "Unix") %{bin-available:lintcstubs_arity_cmt}))

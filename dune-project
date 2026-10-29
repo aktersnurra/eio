@@ -50,6 +50,8 @@
  (depends
   (eio (= :version))
   (iomux (>= 0.2))
+  (kqueue (and (>= 0.7.0)
+               (or (= :os "freebsd") (= :os "macos") (= :os "openbsd"))))
   (mdx (and (>= 2.4.1) :with-test))
   (lintcstubs-arity :with-test)
   (conf-bash :with-test)

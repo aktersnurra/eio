@@ -9,6 +9,7 @@
 
 #include <sys/types.h>
 #include <sys/select.h>
+#include <poll.h>
 #include <sys/socket.h>
 #ifdef __linux__
 #if __GLIBC__ > 2 || __GLIBC_MINOR__ > 24
@@ -52,17 +53,29 @@ static void caml_stat_free_preserving_errno(void *ptr) {
   errno = saved;
 }
 
-/* Wait for a single FD to become readable or writable, with a timeout. */
+CAMLprim value caml_eio_posix_error_of_errno(value v_errno) {
+  CAMLparam1(v_errno);
+  CAMLreturn(caml_unix_error_of_code(Int_val(v_errno)));
+}
+
+/* Fallback for descriptors rejected by the selected multiplexer. macOS
+ * needs select because poll itself rejects some character devices there. */
 CAMLprim value caml_eio_posix_select_one(value v_fd, value v_write, value v_timeout) {
-#ifndef __APPLE__
-  caml_unix_error(EOPNOTSUPP, "This work-around is only for macOS", Nothing);
-#else
   CAMLparam1(v_timeout);
   int fd = Int_val(v_fd);
   double timeout = Double_val(v_timeout);
-  struct timeval tv;
   int ret;
-
+#ifndef __APPLE__
+  struct pollfd pfd = { .fd = fd, .events = Bool_val(v_write) ? POLLOUT : POLLIN };
+  int timeout_ms = (int)(timeout * 1000.0);
+  caml_enter_blocking_section();
+  ret = poll(&pfd, 1, timeout_ms);
+  caml_leave_blocking_section();
+  if (ret == -1) uerror("poll", Nothing);
+  if (ret > 0 && (pfd.revents & POLLNVAL))
+    caml_unix_error(EBADF, "poll", Nothing);
+#else
+  struct timeval tv;
   fd_set *fds = caml_stat_calloc_noexc((size_t)fd / NFDBITS + 1, sizeof(fd_mask));
   if (fds == NULL) caml_raise_out_of_memory();
   FD_SET(fd, fds);
@@ -76,8 +89,8 @@ CAMLprim value caml_eio_posix_select_one(value v_fd, value v_write, value v_time
   caml_leave_blocking_section();
   caml_stat_free_preserving_errno(fds);
   if (ret == -1) uerror("select", Nothing);
-  CAMLreturn(Val_bool(ret > 0));
 #endif
+  CAMLreturn(Val_bool(ret > 0));
 }
 
 CAMLprim value caml_eio_posix_getrandom(value v_ba, value v_off, value v_len) {
