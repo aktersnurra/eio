@@ -142,20 +142,38 @@ let resume_failed t ex node =
   Fiber_context.clear_cancel_fn k.fiber;
   enqueue_failed_thread t k ex
 
+let check_internal_event = function
+  | Poller.Error ex | Read_error ex | Write_error ex -> raise ex
+  | Unpollable -> failwith "Cannot monitor the scheduler's wakeup or signal pipe"
+  | _ -> ()
+
 (* Called when the multiplexer reports readiness for [fd]. *)
 let ready t fd event =
   if fd == t.eventfd_r then (
+    check_internal_event event;
     clear_event_fd t
     (* The scheduler will now look at the run queue again and notice any new items. *)
   ) else if fd == (t.signal_r :> Unix.file_descr) then (
+    check_internal_event event;
     Eio_unix.Private.Signal_fd.ack t.signal_r
-  ) else if event = Poller.Unpollable then (
+  ) else if (match event with
+      | Poller.Unpollable | Error _ | Read_error _ | Write_error _ -> true
+      | _ -> false) then (
     let waiters = Hashtbl.find t.fd_map fd in
     let pending = Lwt_dllist.create () in
-    Lwt_dllist.transfer_l waiters.write pending;
-    Lwt_dllist.transfer_l waiters.read pending;
+    begin match event with
+    | Poller.Read_error _ -> Lwt_dllist.transfer_l waiters.read pending
+    | Write_error _ -> Lwt_dllist.transfer_l waiters.write pending
+    | _ ->
+      Lwt_dllist.transfer_l waiters.write pending;
+      Lwt_dllist.transfer_l waiters.read pending
+    end;
     update t waiters fd;
-    Lwt_dllist.iter_node_r (resume_failed t Unpollable) pending
+    let ex = match event with
+      | Poller.Error ex | Read_error ex | Write_error ex -> ex
+      | _ -> Unpollable
+    in
+    Lwt_dllist.iter_node_r (resume_failed t ex) pending
   ) else (
     let waiters = Hashtbl.find t.fd_map fd in
     let pending = Lwt_dllist.create () in
@@ -254,9 +272,11 @@ let with_sched fn =
   let t = { run_q; poller; fd_map; eventfd; eventfd_r; signal_r;
             active_ops = 0; need_wakeup = Atomic.make false; sleep_q; thread_pool } in
   let monitor fd = Poller.set poller fd ~read:true ~write:false in
-  monitor eventfd_r;
-  monitor (signal_r :> Unix.file_descr);
-  match fn t with
+  match
+    monitor eventfd_r;
+    monitor (signal_r :> Unix.file_descr);
+    fn t
+  with
   | x -> cleanup (); x
   | exception ex ->
     let bt = Printexc.get_raw_backtrace () in

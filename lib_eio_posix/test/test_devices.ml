@@ -37,3 +37,26 @@ let () =
      assert cancelled
   end;
   traceln "test_devices: ok"
+
+(* Unlike /dev/tty above, this runs on headless hosts too. Kqueue classifies
+   character devices as unsupported, so it exercises the bounded worker path. *)
+let () =
+  Eio_posix.run @@ fun env ->
+  Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5.0 @@ fun () ->
+  Switch.run @@ fun sw ->
+  let master, slave = Poller_test_support.Pty.open_pair () in
+  let master = Eio_unix.Fd.of_unix ~sw ~blocking:true ~close_unix:true master in
+  let slave = Eio_unix.Fd.of_unix ~sw ~blocking:true ~close_unix:true slave in
+  let cancelled = Fiber.first
+      (fun () ->
+        Eio_posix.Low_level.await_readable "pty cancellation" slave;
+        false)
+      (fun () -> Eio.Time.sleep (Eio.Stdenv.clock env) 0.05; true)
+  in
+  assert cancelled;
+  let msg = Bytes.of_string "!\n" in
+  assert (Eio_posix.Low_level.write master msg 0 2 = 2);
+  let buf = Bytes.create 2 in
+  assert (Eio_posix.Low_level.read slave buf 0 2 = 2);
+  assert (buf = msg);
+  traceln "controlled PTY cancellation and readiness: ok"

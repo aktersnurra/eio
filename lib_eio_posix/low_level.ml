@@ -22,9 +22,10 @@ type dir_fd =
 
 let in_worker_thread label = Eio_unix.run_in_systhread ~label
 
-(* macOS poll rejects some character devices like /dev/[tty,null]
-   with POLLNVAL. The scheduler reports these by raising [Sched.Unpollable]
-   and falling back to select(2) with a short timeout. *)
+(* Some descriptors cannot be monitored by the selected multiplexer.
+   In particular, macOS poll rejects /dev/[tty,null], and kqueue has
+   device-specific filter support. Use a worker with bounded waits so
+   cancellation is rechecked: select on macOS, poll on other POSIX systems. *)
 let unpollable_select_timeout = 0.2
 
 external eio_select_one : Unix.file_descr -> bool -> float -> bool = "caml_eio_posix_select_one"

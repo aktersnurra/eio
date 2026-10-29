@@ -1,10 +1,40 @@
 (mdx
   (package eio_posix)
   (enabled_if (= %{os_type} "Unix"))
-  (deps (package eio_posix)))
+  (deps (package eio_posix) (env_var "EIO_POSIX_POLLER")))
 
 (tests
   (names open_beneath test_await test_devices test_poller)
+  (deps (env_var "EIO_POSIX_POLLER"))
+  (modules open_beneath test_await test_devices test_poller)
   (package eio_posix)
   (build_if (= %{os_type} "Unix"))
-  (libraries eio_posix))
+  (libraries eio_posix poller_test_support))
+
+(library
+ (name kqueue_test_support)
+ (modules fake_kqueue)
+ (enabled_if (= %{os_type} "Unix"))
+ (libraries eio_posix iomux))
+
+(test
+ (name test_kqueue_unit)
+ (modules test_kqueue_unit)
+ (package eio_posix)
+ (build_if (= %{os_type} "Unix"))
+ (libraries eio_posix kqueue_test_support))
+
+(test
+ (name test_poller_kernel)
+ (deps (env_var "EIO_POSIX_POLLER"))
+ (modules test_poller_kernel)
+ (package eio_posix)
+ (build_if (= %{os_type} "Unix"))
+ (libraries eio_posix iomux))
+
+(library
+ (name poller_test_support)
+ (modules pty)
+ (enabled_if (= %{os_type} "Unix"))
+ (foreign_stubs (language c) (names pty_stubs))
+ (libraries unix))

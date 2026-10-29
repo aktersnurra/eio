@@ -1,106 +1,96 @@
 # kqueue support in eio_posix
 
-Status: the poller boundary is extracted and scheduler regression tests are
-added. This branch still uses `poll`; there is no kqueue implementation or
-performance claim yet.
+Status: native kqueue implementation is available as an explicit opt-in. Poll
+remains the default. Native macOS/FreeBSD CI must pass before changing that
+policy or making performance claims.
 
-Base: upstream commit `1fa7762`, inspected on 2026-10-24.
+The work is stacked on the private poller extraction, based on upstream
+`1fa7762`. The scheduler, cancellation, timers, wake and signal pipes, thread
+pool, filesystem, networking, and process implementations remain shared.
 
-## Repository and scope
+## Building and selecting the poller
 
-Develop this in a fork of `ocaml-multicore/eio`, on branch `kqueue`.
-Keep the fork's default branch aligned with upstream so that each implementation
-step can be reviewed and proposed upstream independently.
+On FreeBSD, macOS, and OpenBSD, the package depends on `kqueue >= 0.7.0`.
+Other POSIX systems can build without the binding and keep using poll. Dune
+selects the native adapter only when the binding is installed. The binding's
+current event layout restricts this adapter to 64-bit little-endian systems.
 
-The goal is a native kqueue multiplexer within `eio_posix`. Reuse its scheduler,
-fiber cancellation, timers, thread pool, filesystem, networking, and process
-implementations. A separate `eio-kqueue` package is not required for this scope.
+```sh
+opam install . --deps-only --with-test
+EIO_BACKEND=posix EIO_POSIX_POLLER=poll dune runtest --force
+EIO_BACKEND=posix EIO_POSIX_POLLER=kqueue dune runtest --force
+```
 
-## First implementation change: isolate the existing poller
+`EIO_BACKEND=posix` selects Eio's shared POSIX backend. `EIO_POSIX_POLLER`
+selects its multiplexer: `poll` or `kqueue`. If unset it selects poll. Invalid
+values and explicitly requesting unavailable kqueue fail clearly; they do not
+silently run poll. Tests declare the environment dependency to avoid cached
+poll results being mistaken for a kqueue run.
 
-`lib_eio_posix/poller.ml` now owns the `Iomux.Poll.t` and its highest populated
-index. Its private interface in `poller.mli` provides:
+## Implementation
 
-- Create and close a poller.
-- Set a descriptor's read/write interests; empty interests remove it.
-- Wait with an infinite, zero, or nanosecond timeout.
-- Deliver ready descriptors with independent read, write, and unpollable results.
+- `poll_poller.ml` retains the existing Iomux poll implementation.
+- `kqueue_poller.ml` owns kernel-independent registration bookkeeping.
+- `kqueue_backend.available.ml` adapts kqueue-ml; the unavailable adapter keeps
+  the poll build independent of that package.
+- `poller.ml` selects the implementation behind the same private interface.
 
-Waiter lists and continuation management remain in the scheduler. The poll
-adapter preserves the existing handling of `POLLHUP`, `POLLERR`, and `POLLNVAL`.
-Both the domain wake pipe and `Signal_fd` are monitored through the same
-interface. Upstream EINTR handling for wake-pipe reads and writes is retained.
+Each scheduler domain owns one close-on-exec kqueue. The adapter uses
+level-triggered read/write filters and a fixed 256-event result buffer. Full
+buffers are handled by subsequent waits. No edge-triggering, kernel timers,
+`EVFILT_USER`, or changes to Eio's process signalling are introduced.
 
-`Iomux.Poll` remains the only implementation. The POSIX suite must pass before
-adding kqueue. CI explicitly selects the POSIX backend on Linux and macOS.
+Every replacement gets a fresh integer cookie in `udata`. Dispatch checks that
+cookie against the current registration, including between callbacks in one
+batch. Closing/removing a descriptor or replacing its interests invalidates old
+results. A stale second event cannot wake a new waiter for a reused FD number.
+Registration updates use a separate changelist, so they cannot overwrite the
+batch currently being dispatched.
 
-Verification on Linux with OCaml 5.4.0:
+The initial adapter recreates filters synchronously. A partially failed update
+retires both filters before exposing the error. Missing filters during cleanup
+are accepted because close/dup2 may already have removed them. Unexpected
+cleanup failures prevent the scheduler from sleeping indefinitely on stale
+kernel state. Future batching needs its own benchmarks and tests.
 
-- `dune build @all` passes.
-- `dune runtest lib_eio_posix` passes, including all seven new scheduler tests.
-- `make test_posix` reaches three existing Markdown test failures involving
-  named Unix sockets and ownership changes denied by the execution environment.
-  Unmodified upstream `1fa7762` produces the same three failures with identical
-  corrected output. A complete suite run on an unrestricted host is still needed.
+Rejected filters use the existing bounded worker fallback: select on macOS,
+poll on other POSIX systems. Regular files and directories get unconditional
+readiness, preserving poll semantics even at EOF. Kqueue EOF is directional;
+buffered read data remains available. Socket errors in `fflags` fail only the
+corresponding direction, so connection refusal is not mistaken for success.
+An interrupted wait returns to the scheduler to reconsider timers and work.
 
-## Second implementation change: add kqueue
+## Validation
 
-Evaluate existing OCaml kqueue bindings against the private poller interface
-before choosing a dependency. Check runtime-lock handling, timeout precision,
-close-on-exec support, event-buffer ownership, and FreeBSD compatibility.
+The deterministic suite covers stale batches, descriptor replacement,
+remaining interests after cancellation, partially failed registration,
+interrupted waits, pending fallback events, resource errors, cleanup, regular
+files at EOF, buffered data with EOF, peer shutdown, and connection refusal.
+Kernel-independent tests run with a controllable fake driver on all POSIX hosts.
 
-Start with level-triggered `EVFILT_READ` and `EVFILT_WRITE`. Keep the existing
-wake and signal pipes; do not introduce `EVFILT_USER`, edge-triggered semantics,
-or changes to process signalling in this patch.
+Native CI is configured for macOS with both pollers and FreeBSD 14.3 with both
+pollers. Linux retains poll coverage. Native runs are still required.
 
-Important invariants:
+Local integration also exercises the adapter through kqueue-ml with a
+Linux libkqueue compatibility build. This is additional coverage, not a native
+BSD result. The full upstream suite has three environment restrictions here:
+named Unix sockets and ownership changes fail in `tests/fd_passing.md`,
+`tests/network.md`, and `tests/fs.md`. Unmodified upstream produces identical
+corrected output for those files.
 
-- Cancelled fibers must not retain kernel interests after their last waiter is
-  removed. Cancelling a reader must preserve any remaining writer interest.
-- Closing a descriptor removes kqueue registrations automatically. Reusing its
-  integer must establish fresh registrations.
-- An event already returned in a batch must not wake a waiter registered later
-  for a reused descriptor. Define registration identity and stale-event handling
-  explicitly before implementation.
-- Read and write filters can produce separate events for one descriptor in the
-  same batch. Dispatch must tolerate a preceding event removing its waiter entry.
-- EOF and socket failures must resume the relevant waiters so the actual I/O
-  operation can report the result. Change errors (`EV_ERROR`) must be handled
-  separately from readiness.
-- Return from an interrupted wait to the scheduler to reconsider timers and
-  runnable work; do not restart the original timeout unconditionally.
-- Each scheduler owns and closes its poller, including on exceptional exit.
+## Performance gate and upstream path
 
-Keep the poll fallback available on all current POSIX platforms. Add an explicit
-test selection mechanism so CI and benchmarks can exercise both pollers on the
-same BSD/macOS host. An explicitly requested unavailable poller should fail
-clearly. Automatic selection policy can follow native validation.
+Benchmark on a real FreeBSD host before changing the default. Use 100, 1,000,
+and 10,000 established connections, with 1%, 10%, and 100% active. Record CPU,
+throughput, p99 latency, allocations, connection churn, descriptor limits, OS,
+compiler, Eio commit, and methodology. Keep application/build settings identical.
 
-## Validation gates
+Keep the fork's default branch aligned with upstream and review the extraction,
+native implementation, and property tests separately. Contact maintainers only
+when explicitly asked.
 
-1. Run the existing POSIX suite with the extracted poll adapter.
-2. Add focused regressions for cancellation with remaining waiters, simultaneous
-   read/write readiness, close and descriptor reuse, stale events, EOF, socket
-   errors, and repeated scheduler creation and teardown.
-3. Run the existing timer, signal, process, and cross-domain wakeup tests under
-   both implementations on FreeBSD and macOS. Retain Linux poll coverage.
-4. Benchmark on a real FreeBSD host before claiming a performance improvement.
-
-Use 100, 1,000, and 10,000 established connections, with 1%, 10%, and 100% active.
-Record CPU, throughput, p99 latency, allocations, and connection churn; keep the
-application, workload, and build settings identical between runs. Report OS,
-compiler, Eio commit, descriptor limit, and benchmark methodology with results.
-
-## Upstream path
-
-Prepare a short design discussion describing the private poller boundary and
-the existing prototype history. Contact maintainers only when explicitly asked.
-Propose the extraction and kqueue implementation separately if that makes review
-easier. Do not publish an additional runtime package before resolving whether
-the integration belongs in `eio_posix`.
-
-This work changes readiness notification. It does not provide io_uring-style
-buffer selection, asynchronous disk I/O, or transaction batching.
+This is readiness notification, not io_uring-style buffer selection,
+asynchronous disk I/O, or transaction batching.
 
 ## Reproducible validation
 
@@ -116,6 +106,25 @@ bash .github/ci/posix.sh test
 
 A configured workflow is not evidence of execution. The unrestricted full-suite
 requirement above remains open until a successful run is linked to its commit.
+
+## Error and lifecycle hardening
+
+Unsupported native filters may use the bounded worker fallback. Invalid
+registrations (`EBADF` or `EINVAL`) instead fail the operation; they are not
+interpreted as device capability failures. Unexpected non-OS exceptions escape
+immediately and require the owner to close the poller. A failed kernel removal
+poisons subsequent waits and retains the first failure and its backtrace.
+
+The real-adapter regressions exercise active `dup2` reuse, replacement during
+dispatch, 300 simultaneously ready sockets across result batches, repeated normal
+and exceptional scheduler teardown, close-on-exec, and actual signal interruption.
+Each case runs in a child supervised by a separate 15-second watchdog, so a stuck
+poller cannot disable its own timeout. The device tests use a controlled PTY even
+on hosts without a controlling terminal.
+
+These tests run under the explicitly selected poller. Passing with Linux poll
+validates the fixtures, not native kqueue. The `dup2` regression is not disabled
+for libkqueue or native platforms; failures must be diagnosed rather than waived.
 
 Full-suite CI runs clean the Dune build directory first. MDX examples mutate
 filesystem fixtures, so `--force` alone is insufficient to isolate a second
